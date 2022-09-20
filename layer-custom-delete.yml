@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Deleting the lambda layers when stack gets deleted
+
+
+Resources:
+ 
+  MyNodejsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub ${AWS::StackName}-layer  # layer Name
+      Content:
+        S3Bucket: lmda-layer-nodejs            # S3 Bucket name where the lambda layer zip file located
+        S3Key: NodejsLayer.zip                 # Zip file name
+      CompatibleRuntimes:
+        - nodejs12.x   
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - lambda.amazonaws.com
+                - events.amazonaws.com
+            Action: 
+            - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+
+  DeleteLayerVersions:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Code: 
+         ZipFile: |
+            from __future__ import print_function
+            import json, boto3, logging
+            import urllib3
+            import json
+            
+            SUCCESS = "SUCCESS"
+            FAILED = "FAILED"
+            
+            http = urllib3.PoolManager()
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+            
+            def lambda_handler(event, context):
+              logger.info("event: {}".format(event))
+              client = boto3.client('lambda')
+              try:
+                  layer = event['ResourceProperties']['LayerName']
+                  logger.info("layer: {}, event['RequestType']: {}".format(layer,event['RequestType']))
+                  
+                  if event['RequestType'] == 'a':
+                      for versions in client.list_layer_versions(LayerName=layer)['LayerVersions']:
+                          version_number=versions['Version']
+                          response = client.delete_layer_version(LayerName=layer,VersionNumber=version_number)
+            
+                  sendResponseCfn(event, context, SUCCESS)
+              except Exception as e:
+                  logger.info("Exception: {}".format(e))
+                  sendResponseCfn(event, context, FAILED)
+            
+            def sendResponseCfn(event, context, responseStatus):
+              responseData = {}
+              responseData['Data'] = {}
+              send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")
+            
+            def send(event, context, responseStatus, responseData, physicalResourceId=None, noEcho=False, reason=None):
+                responseUrl = event['ResponseURL']
+            
+                print(responseUrl)
+            
+                responseBody = {
+                    'Status' : responseStatus,
+                    'Reason' : reason or "See the details in CloudWatch Log Stream: {}".format(context.log_stream_name),
+                    'PhysicalResourceId' : physicalResourceId or context.log_stream_name,
+                    'StackId' : event['StackId'],
+                    'RequestId' : event['RequestId'],
+                    'LogicalResourceId' : event['LogicalResourceId'],
+                    'NoEcho' : noEcho,
+                    'Data' : responseData
+                }
+            
+                json_responseBody = json.dumps(responseBody)
+            
+                print("Response body:")
+                print(json_responseBody)
+            
+                headers = {
+                    'content-type' : '',
+                    'content-length' : str(len(json_responseBody))
+                }
+            
+                try:
+                    response = http.request('PUT', responseUrl, headers=headers, body=json_responseBody)
+                    print("Status code:", response.status)
+            
+            
+                except Exception as e:
+            
+                    print("send(..) failed executing http.request(..):", e)
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 900
+      TracingConfig:
+        Mode: Active
+
+    
+######################## Custom Resource ###############################  
+    
+  cleanuplambdalayer:
+    Type: Custom::lambdalayerdelete
+    Properties:
+      ServiceToken: !GetAtt DeleteLayerVersions.Arn
+      LayerName: !Sub ${AWS::StackName}-layer       # layer Name need to pass to custom resource for deleting it when stack is delete.
+
+
+  
